@@ -18,13 +18,7 @@ import glob
 import math
 import os
 import shutil
-
-try:
-    import cudf
-    import dask_cudf
-except ImportError:
-    cudf = None
-    dask_cudf = None
+import sys
 
 import numpy as np
 import pytest
@@ -32,10 +26,13 @@ from pandas.api.types import is_integer_dtype
 
 import nvtabular as nvt
 from merlin.core import dispatch
-from merlin.core.dispatch import HAS_GPU, make_df
+from merlin.core.compat import cudf, dask_cudf
+from merlin.core.dispatch import HAS_GPU, create_multihot_col, make_df, make_series
 from merlin.core.utils import set_dask_client
 from merlin.dag import ColumnSelector, postorder_iter_nodes
-from merlin.schema import Schema, Tags
+from merlin.dataloader.loader_base import LoaderBase as Loader
+from merlin.dataloader.ops.embeddings import EmbeddingOperator
+from merlin.schema import Tags
 from nvtabular import Dataset, Workflow, ops
 from tests.conftest import assert_eq, get_cats, mycols_csv
 
@@ -50,6 +47,15 @@ def test_workflow_double_fit():
         workflow = nvt.Workflow(cat_feats)
         workflow.fit(df_event)
         workflow.transform(df_event).to_ddf().compute()
+
+
+def test_workflow_transform_df():
+    df = make_df({"user_session": ["1", "2", "4", "4", "5"]})
+    ops = ["user_session"] >> nvt.ops.Categorify()
+    dataset = nvt.Dataset(df)
+    workflow = nvt.Workflow(ops)
+    workflow.fit(dataset)
+    assert isinstance(workflow.transform(df), type(df))
 
 
 @pytest.mark.parametrize("engine", ["parquet"])
@@ -74,13 +80,12 @@ def test_workflow_fit_op_rename(tmpdir, dataset, engine):
 
 @pytest.mark.parametrize("engine", ["parquet"])
 def test_grab_additional_input_columns(dataset, engine):
-    schema = Schema(["x", "y"])
     node1 = ["x"] >> ops.FillMissing()
     node2 = node1 >> ops.Clip(min_value=0)
 
     add_node = node2 + ["y"]
 
-    workflow = Workflow(add_node).fit_schema(schema)
+    workflow = Workflow(add_node).fit_schema(dataset.schema)
     output_df = workflow.transform(dataset).to_ddf().compute()
 
     assert len(workflow.output_node.input_columns.names) == 2
@@ -135,8 +140,8 @@ def test_gpu_workflow_api(tmpdir, client, df, dataset, gpu_memory_frac, engine, 
         cats_expected0 = df["name-cat"].unique().values_host if HAS_GPU else df["name-cat"].unique()
         cats0 = get_cats(workflow, "name-cat")
         # adding the None entry as a string because of move from gpu
-        assert all(cat in [None] + sorted(cats_expected0.tolist()) for cat in cats0.tolist())
-        assert len(cats0.tolist()) == len(cats_expected0.tolist() + [None])
+        assert all(cat in sorted(cats_expected0.tolist()) for cat in cats0.tolist())
+        assert len(cats0.tolist()) == len(cats_expected0.tolist())
     if HAS_GPU:
         cats_expected1 = (
             df["name-string"].unique().values_host if HAS_GPU else df["name-string"].unique()
@@ -145,8 +150,8 @@ def test_gpu_workflow_api(tmpdir, client, df, dataset, gpu_memory_frac, engine, 
         cats_expected1 = df["name-string"].unique()
     cats1 = get_cats(workflow, "name-string")
     # adding the None entry as a string because of move from gpu
-    assert all(cat in [None] + sorted(cats_expected1.tolist()) for cat in cats1.tolist())
-    assert len(cats1.tolist()) == len(cats_expected1.tolist() + [None])
+    assert all(cat in sorted(cats_expected1.tolist()) for cat in cats1.tolist())
+    assert len(cats1.tolist()) == len(cats_expected1.tolist())
 
     # Write to new "shuffled" and "processed" dataset
     workflow.transform(dataset).to_parquet(
@@ -230,15 +235,15 @@ def test_gpu_workflow(tmpdir, df, dataset, gpu_memory_frac, engine, dump):
         cats_expected0 = df["name-cat"].unique().values_host if HAS_GPU else df["name-cat"].unique()
         cats0 = get_cats(workflow, "name-cat")
         # adding the None entry as a string because of move from gpu
-        assert all(cat in [None] + sorted(cats_expected0.tolist()) for cat in cats0.tolist())
-        assert len(cats0.tolist()) == len(cats_expected0.tolist() + [None])
+        assert all(cat in sorted(cats_expected0.tolist()) for cat in cats0.tolist())
+        assert len(cats0.tolist()) == len(cats_expected0.tolist())
     cats_expected1 = (
         df["name-string"].unique().values_host if HAS_GPU else df["name-string"].unique()
     )
     cats1 = get_cats(workflow, "name-string")
     # adding the None entry as a string because of move from gpu
-    assert all(cat in [None] + sorted(cats_expected1.tolist()) for cat in cats1.tolist())
-    assert len(cats1.tolist()) == len(cats_expected1.tolist() + [None])
+    assert all(cat in sorted(cats_expected1.tolist()) for cat in cats1.tolist())
+    assert len(cats1.tolist()) == len(cats_expected1.tolist())
 
     # Write to new "shuffled" and "processed" dataset
     workflow.transform(dataset).to_parquet(
@@ -311,15 +316,15 @@ def test_gpu_workflow_config(tmpdir, client, df, dataset, gpu_memory_frac, engin
         cats_expected0 = df["name-cat"].unique().values_host if HAS_GPU else df["name-cat"].unique()
         cats0 = get_cats(workflow, "name-cat")
         # adding the None entry as a string because of move from gpu
-        assert all(cat in [None] + sorted(cats_expected0.tolist()) for cat in cats0.tolist())
-        assert len(cats0.tolist()) == len(cats_expected0.tolist() + [None])
+        assert all(cat in sorted(cats_expected0.tolist()) for cat in cats0.tolist())
+        assert len(cats0.tolist()) == len(cats_expected0.tolist())
     cats_expected1 = (
         df["name-string"].unique().values_host if HAS_GPU else df["name-string"].unique()
     )
     cats1 = get_cats(workflow, "name-string")
     # adding the None entry as a string because of move from gpu
-    assert all(cat in [None] + sorted(cats_expected1.tolist()) for cat in cats1.tolist())
-    assert len(cats1.tolist()) == len(cats_expected1.tolist() + [None])
+    assert all(cat in sorted(cats_expected1.tolist()) for cat in cats1.tolist())
+    assert len(cats1.tolist()) == len(cats_expected1.tolist())
 
     # Write to new "shuffled" and "processed" dataset
     workflow.transform(dataset).to_parquet(
@@ -378,7 +383,6 @@ def test_parquet_output(client, use_client, tmpdir, shuffle):
 
 @pytest.mark.parametrize("engine", ["parquet"])
 def test_join_external_workflow(tmpdir, df, dataset, engine):
-
     # Define "external" table
     how = "left"
     drop_duplicates = True
@@ -667,3 +671,165 @@ def test_workflow_saved_schema(tmpdir):
     for node in postorder_iter_nodes(workflow2.output_node):
         assert node.input_schema is not None
         assert node.output_schema is not None
+
+
+def test_stat_op_workflow_roundtrip(tmpdir):
+    """
+    Categorify and TargetEncoding produce intermediate stats files that must be properly
+    saved and re-loaded.
+    """
+    N = 100
+
+    df = Dataset(
+        make_df(
+            {
+                "a": np.random.randint(0, 100000, N),
+                "item_id": np.random.randint(0, 100, N),
+                "user_id": np.random.randint(0, 100, N),
+                "click": np.random.randint(0, 2, N),
+            }
+        ),
+    )
+
+    outputs = ["a"] >> nvt.ops.Categorify()
+
+    continuous = (
+        ["user_id", "item_id"]
+        >> nvt.ops.TargetEncoding(["click"], kfold=1, p_smooth=20)
+        >> nvt.ops.Normalize()
+    )
+    outputs += continuous
+    wf = nvt.Workflow(outputs)
+
+    wf.fit(df)
+    expected = wf.transform(df).compute()
+    wf.save(tmpdir)
+
+    wf2 = nvt.Workflow.load(tmpdir)
+    transformed = wf2.transform(df).compute()
+    assert_eq(transformed, expected)
+
+
+def test_workflow_infer_modules_byvalue(tmp_path):
+    module_fn = tmp_path / "not_a_real_module.py"
+    sys.path.append(str(tmp_path))
+
+    with open(module_fn, "w") as module_f:
+        module_f.write("def identity(col):\n    return col")
+
+    import not_a_real_module
+
+    f_0 = not_a_real_module.identity
+    f_1 = lambda x: not_a_real_module.identity(x)  # noqa
+    f_2 = lambda x: f_0(x)  # noqa
+
+    try:
+        for fn, f in {
+            "not_a_real_module.identity": f_0,
+            "lambda x: not_a_real_module.identity(x)": f_1,
+            "lambda x: f_0(x)": f_2,
+        }.items():
+            assert not_a_real_module in Workflow._getmodules(
+                [f]
+            ), f"inferred module dependencies from {fn}"
+
+    finally:
+        sys.path.pop()
+        del sys.modules["not_a_real_module"]
+
+
+def test_workflow_explicit_modules_byvalue(tmp_path):
+    module_fn = tmp_path / "not_a_real_module.py"
+    sys.path.append(str(tmp_path))
+
+    with open(module_fn, "w") as module_f:
+        module_f.write("def identity(col):\n    return col")
+
+    import not_a_real_module
+
+    wf = nvt.Workflow(["col_a"] >> nvt.ops.LambdaOp(not_a_real_module.identity))
+
+    wf.save(str(tmp_path / "identity-workflow"), modules_byvalue=[not_a_real_module])
+
+    del not_a_real_module
+    del sys.modules["not_a_real_module"]
+    os.unlink(str(tmp_path / "not_a_real_module.py"))
+
+    Workflow.load(str(tmp_path / "identity-workflow"))
+
+
+def test_workflow_auto_infer_modules_byvalue(tmp_path):
+    module_fn = tmp_path / "not_a_real_module.py"
+    sys.path.append(str(tmp_path))
+
+    with open(module_fn, "w") as module_f:
+        module_f.write("def identity(col):\n    return col")
+
+    import not_a_real_module
+
+    wf = nvt.Workflow(["col_a"] >> nvt.ops.LambdaOp(not_a_real_module.identity))
+
+    wf.save(str(tmp_path / "identity-workflow"), modules_byvalue="auto")
+
+    del not_a_real_module
+    del sys.modules["not_a_real_module"]
+    os.unlink(str(tmp_path / "not_a_real_module.py"))
+
+    Workflow.load(str(tmp_path / "identity-workflow"))
+
+
+@pytest.mark.parametrize("cpu", [None, "cpu"] if HAS_GPU else ["cpu"])
+def test_embedding_cat_export_import(tmpdir, cpu):
+    string_ids = ["alpha", "bravo", "charlie", "delta", "foxtrot"]
+    training_data = make_df(
+        {
+            "string_id": string_ids,
+        }
+    )
+    training_data["embeddings"] = create_multihot_col(
+        [0, 5, 10, 15, 20, 25], make_series(np.random.rand(25))
+    )
+
+    cat_op = nvt.ops.Categorify()
+
+    # first workflow that categorifies all data
+    graph1 = ["string_id"] >> cat_op
+    emb_res = Workflow(graph1 + ["embeddings"]).fit_transform(
+        Dataset(training_data, cpu=(cpu is not None))
+    )
+    npy_path = str(tmpdir / "embeddings.npy")
+    emb_res.to_npy(npy_path)
+
+    ids_and_embeddings = np.load(npy_path)
+    # second workflow that categorifies the embedding table data
+    df = make_df({"string_id": np.random.choice(string_ids, 30)})
+    graph2 = ["string_id"] >> cat_op
+    train_res = Workflow(graph2).transform(Dataset(df, cpu=(cpu is not None)))
+
+    ids = ids_and_embeddings[:, 0].astype(int)
+    embeddings = ids_and_embeddings[:, 1:]
+
+    data_loader = Loader(
+        train_res,
+        batch_size=1,
+        transforms=[
+            EmbeddingOperator(
+                embeddings,
+                id_lookup_table=ids,
+                lookup_key="string_id",
+            )
+        ],
+        shuffle=False,
+        device=cpu,
+    )
+    embeddings_by_id = dict(zip(ids, embeddings))
+    for idx, batch in enumerate(data_loader):
+        x, _ = batch
+        b_df = x.to_df()
+        org_df = make_df(
+            {
+                "string_id": x["string_id"].values,
+                "embeddings": [embeddings_by_id[_id] for _id in x["string_id"].values.tolist()],
+            }
+        )
+        assert_eq(b_df, org_df)

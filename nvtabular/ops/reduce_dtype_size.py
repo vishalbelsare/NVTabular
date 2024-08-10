@@ -17,10 +17,9 @@ import dask.dataframe as dd
 import numpy as np
 
 from merlin.core.dispatch import DataFrameType, annotate
+from merlin.dag.ops.stat_operator import StatOperator
 from merlin.schema import Schema
-
-from .operator import ColumnSelector, Operator
-from .stat_operator import StatOperator
+from nvtabular.ops.operator import ColumnSelector, Operator
 
 _INT_DTYPES = [np.int8, np.int16, np.int32, np.int64]
 
@@ -51,8 +50,9 @@ class ReduceDtypeSize(StatOperator):
 
     @annotate("reduce_dtype_size_transform", color="darkgreen", domain="nvt_python")
     def transform(self, col_selector: ColumnSelector, df: DataFrameType) -> DataFrameType:
-        for col, dtype in self.dtypes.items():
-            df[col] = df[col].astype(dtype)
+        for col_name, col_dtype in self.dtypes.items():
+            np_dtype = col_dtype.to_numpy
+            df[col_name] = df[col_name].astype(np_dtype)
         return df
 
     def compute_output_schema(self, input_schema, selector, prev_output_schema=None):
@@ -64,14 +64,14 @@ class ReduceDtypeSize(StatOperator):
             column = input_schema[column]
 
             dtype = column.dtype
-            if np.issubdtype(column.dtype, np.integer):
+            if column.dtype.element_type.value == "int":
                 for possible_dtype in _INT_DTYPES:
                     dtype_range = np.iinfo(possible_dtype)
                     if min_value >= dtype_range.min and max_value <= dtype_range.max:
                         dtype = possible_dtype
                         break
 
-            elif np.issubdtype(column.dtype, np.float):
+            elif column.dtype.element_type.value == "float":
                 dtype = self.float_dtype
 
             output_columns.append(column.with_dtype(dtype))

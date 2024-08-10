@@ -1,19 +1,20 @@
 import numpy as np
 
-try:
-    from cudf import to_datetime
-except ImportError:
-    from dask.dataframe import to_datetime
-
 import nvtabular as nvt
+from merlin.core.compat import cudf
 from merlin.core.dispatch import make_df
 from merlin.schema import Schema
 from nvtabular import ColumnSelector
 
+if cudf:
+    from cudf import to_datetime
+else:
+    from dask.dataframe import to_datetime
+
 NUM_ROWS = 10000
 
 
-def test_tf4rec():
+def test_tf4rec(tmpdir):
     inputs = {
         "user_session": np.random.randint(1, 10000, NUM_ROWS),
         "product_id": np.random.randint(1, 51996, NUM_ROWS),
@@ -28,7 +29,7 @@ def test_tf4rec():
 
     cat_feats = (
         ["user_session", "product_id", "category_id"]
-        >> nvt.ops.Categorify()
+        >> nvt.ops.Categorify(out_path=str(tmpdir))
         >> nvt.ops.LambdaOp(lambda col: col + 1)
     )
 

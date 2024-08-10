@@ -18,22 +18,11 @@ import random
 import string
 
 import numpy as np
-import pandas as pd
 import psutil
-
-try:
-    import cupy
-except ImportError:
-    cupy = np
-
-try:
-    import cudf
-except ImportError:
-    cudf = pd
-
 from scipy import stats
 from scipy.stats import powerlaw, uniform
 
+from merlin.core.compat import cupy
 from merlin.core.dispatch import (
     HAS_GPU,
     concat,
@@ -45,6 +34,8 @@ from merlin.core.dispatch import (
 )
 from merlin.core.utils import device_mem_size
 from merlin.io import Dataset
+
+xp = cupy or np
 
 
 class UniformDistro:
@@ -64,9 +55,9 @@ class PowerLawDistro:
     def create_col(self, num_rows, dtype=np.float32, min_val=0, max_val=1):
         gamma = 1 - self.alpha
         # range 1.0 - 2.0 to avoid using 0, which represents unknown, null, None
-        ser = make_df(cupy.random.uniform(0.0, 1.0, size=num_rows))[0]
-        factor = cupy.power(max_val, gamma) - cupy.power(min_val, gamma)
-        ser = (ser * factor.item()) + cupy.power(min_val, gamma).item()
+        ser = make_df(xp.random.uniform(0.0, 1.0, size=num_rows))[0]
+        factor = xp.power(max_val, gamma) - xp.power(min_val, gamma)
+        ser = (ser * factor.item()) + xp.power(min_val, gamma).item()
         exp = 1.0 / gamma
         ser = ser.pow(exp)
         # replace zeroes saved for unknown
@@ -123,24 +114,28 @@ class DatasetGen:
             if col.multi_min and col.multi_max:
                 if HAS_GPU:
                     ser = dist.create_col(
-                        col_size + 1, dtype=np.long, min_val=col.multi_min, max_val=col.multi_max
-                    ).ceil()
+                        col_size + 1, dtype=int, min_val=col.multi_min, max_val=col.multi_max
+                    )
+                    ser = make_series(np.ceil(ser)).astype(ser.dtype)
+                    _cumsum = xp.cumsum
                 else:
                     ser = dist.create_col(
-                        col_size + 1, dtype=np.long, min_val=col.multi_min, max_val=col.multi_max
+                        col_size + 1, dtype=int, min_val=col.multi_min, max_val=col.multi_max
                     )
                     ser = make_df(np.ceil(ser))[0]
+                    _cumsum = np.cumsum
                 # sum returns numpy dtype
                 col_size = int(ser.sum())
-                offs = make_df(cupy.cumsum(ser.values))[0]
+                offs = make_df(_cumsum(ser.values))[0]
                 offs = offs.astype("int32")
             if HAS_GPU:
                 ser = dist.create_col(
-                    col_size, dtype=np.long, min_val=col.min_val, max_val=col.cardinality
-                ).ceil()
+                    col_size, dtype=int, min_val=col.min_val, max_val=col.cardinality
+                )
+                ser = make_series(np.ceil(ser)).astype(ser.dtype)
             else:
                 ser = dist.create_col(
-                    col_size, dtype=np.long, min_val=col.min_val, max_val=col.cardinality
+                    col_size, dtype=int, min_val=col.min_val, max_val=col.cardinality
                 )
                 ser = make_df(np.ceil(ser))[0]
                 ser = ser.astype("int32")
@@ -159,13 +154,13 @@ class DatasetGen:
         return df
 
     def create_labels(self, size, labs_rep):
+        """Create Label columns"""
         df = make_df()
         for col in labs_rep:
             dist = col.distro or self.dist
             if HAS_GPU:
-                ser = dist.create_col(
-                    size, dtype=col.dtype, min_val=0, max_val=col.cardinality
-                ).ceil()
+                ser = dist.create_col(size, dtype=col.dtype, min_val=0, max_val=col.cardinality)
+                ser = make_series(np.ceil(ser)).astype(ser.dtype)
             else:
                 ser = dist.create_col(size, dtype=col.dtype, min_val=0, max_val=col.cardinality)
                 ser = make_df(np.ceil(ser))[0]
@@ -175,6 +170,9 @@ class DatasetGen:
         return df
 
     def merge_cats_encoding(self, ser, cats):
+        """Merges the categories with a target series.
+        Creating categorical representation for ser.
+        """
         # df and cats are both series
         # set cats to dfs
         offs = None
@@ -188,6 +186,7 @@ class DatasetGen:
         return ser["names"], offs
 
     def create_cat_entries(self, cardinality, min_size=1, max_size=5):
+        """Create categorical encoding values to be used with a target series."""
         set_entries = []
         while len(set_entries) <= cardinality:
             letters = string.ascii_letters + string.digits
@@ -203,6 +202,9 @@ class DatasetGen:
         cols,
         entries=False,
     ):
+        """
+        Create a dataframe with the supplied columns and sizes.
+        """
         conts_rep = cols["conts"] if "conts" in cols else None
         cats_rep = cols["cats"] if "cats" in cols else None
         labs_rep = cols["labels"] if "labels" in cols else None
@@ -228,6 +230,9 @@ class DatasetGen:
         entries=False,
         output=".",
     ):
+        """Create the full dataset (dataframe) that can be comprised of multiple dataframes.
+        Allowing for larger than memory sized datasets.
+        """
         files_created = []
         # always use entries for row_size estimate
         df_single = self.create_df(
@@ -261,6 +266,7 @@ class DatasetGen:
         return files_created
 
     def create_vocab(self, cats_rep, output):
+        """Create actual string values for entries in series. Without encoding."""
         # build vocab for necessary categoricals using cats_rep info
         vocab_files = []
         for col in cats_rep:
@@ -361,10 +367,10 @@ class DatasetGen:
         name = ser.name
         ser.name = "ind"
         ind = ser.drop_duplicates().values
-        ind_random = cupy.random.permutation(ind)
-        df_map = cudf.DataFrame({"ind": ind, "ind_random": ind_random})
+        ind_random = xp.random.permutation(ind)
+        df_map = make_df({"ind": ind, "ind_random": ind_random})
         if not HAS_GPU:
-            ser = cudf.DataFrame(ser)
+            ser = make_df(ser)
         ser = ser.merge(df_map, how="left", left_on="ind", right_on="ind")["ind_random"]
         ser.name = name
         return ser

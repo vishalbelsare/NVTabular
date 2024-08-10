@@ -43,7 +43,7 @@ namespace nvtabular
 
         if ((dtype.kind() == 'O') || (dtype.kind() == 'U'))
         {
-          int64_t i = 0;
+          int64_t i = UNIQUE_OFFSET;
           for (auto &value : values)
           {
             if (!py::cast<bool>(isnull(value)))
@@ -93,6 +93,12 @@ namespace nvtabular
           case 'u':
             switch (dtype.itemsize())
             {
+            case 1:
+              insert_int_mapping<uint8_t>(values);
+              return;
+            case 2:
+              insert_int_mapping<uint16_t>(values);
+              return;
             case 4:
               insert_int_mapping<uint32_t>(values);
               return;
@@ -104,6 +110,12 @@ namespace nvtabular
           case 'i':
             switch (dtype.itemsize())
             {
+            case 1:
+              insert_int_mapping<int8_t>(values);
+              return;
+            case 2:
+              insert_int_mapping<int16_t>(values);
+              return;
             case 4:
               insert_int_mapping<int32_t>(values);
               return;
@@ -126,20 +138,29 @@ namespace nvtabular
         size_t size = values.size();
         for (size_t i = 0; i < size; ++i)
         {
-          mapping_int[static_cast<int64_t>(data[i])] = i;
+          mapping_int[static_cast<int64_t>(data[i])] = i + UNIQUE_OFFSET;
         }
       }
 
       template <typename T>
       py::array transform_int(py::array_t<T> input) const
       {
+        py::object pandas = py::module_::import("pandas");
+        py::object isnull = pandas.attr("isnull");
         py::array_t<int64_t> output(input.size());
         const T *input_data = input.data();
         int64_t *output_data = output.mutable_data();
         for (int64_t i = 0; i < input.size(); ++i)
         {
           auto it = mapping_int.find(static_cast<int64_t>(input_data[i]));
-          output_data[i] = it == mapping_int.end() ? 0 : it->second;
+          if (it == mapping_int.end())
+          {
+            output_data[i] = py::cast<bool>(isnull(input_data[i])) ? NULL_INDEX : OOV_INDEX;
+          }
+          else
+          {
+            output_data[i] = it->second;
+          }
         }
         return output;
       }
@@ -157,18 +178,18 @@ namespace nvtabular
           {
             if (value.is_none())
             {
-              data[i] = 0;
+              data[i] = NULL_INDEX;
             }
             else if (PyUnicode_Check(value.ptr()) || PyBytes_Check(value.ptr()))
             {
               std::string key = py::cast<std::string>(value);
               auto it = mapping_str.find(key);
-              data[i] = it == mapping_str.end() ? 0 : it->second;
+              data[i] = it == mapping_str.end() ? OOV_INDEX : it->second;
             }
             else if (PyBool_Check(value.ptr()))
             {
               auto it = mapping_int.find(value.ptr() == Py_True);
-              data[i] = it == mapping_int.end() ? 0 : it->second;
+              data[i] = it == mapping_int.end() ? OOV_INDEX : it->second;
             }
             else
             {
@@ -198,6 +219,10 @@ namespace nvtabular
           case 'u':
             switch (itemsize)
             {
+            case 1:
+              return transform_int<uint8_t>(input);
+            case 2:
+              return transform_int<uint16_t>(input);
             case 4:
               return transform_int<uint32_t>(input);
             case 8:
@@ -207,6 +232,10 @@ namespace nvtabular
           case 'i':
             switch (itemsize)
             {
+            case 1:
+              return transform_int<int8_t>(input);
+            case 2:
+              return transform_int<int16_t>(input);
             case 4:
               return transform_int<int32_t>(input);
             case 8:
@@ -227,6 +256,11 @@ namespace nvtabular
 
       std::unordered_map<std::string, int64_t> mapping_str;
       std::unordered_map<int64_t, int64_t> mapping_int;
+
+      // TODO: Handle multiple OOV buckets?
+      const int64_t NULL_INDEX = 1;
+      const int64_t OOV_INDEX = 2;
+      const int64_t UNIQUE_OFFSET = 3;
     };
 
     // Reads in a parquet category mapping file in cpu memory using pandas
@@ -303,8 +337,13 @@ namespace nvtabular
           // this operator currently only supports CPU arrays
           .def_property_readonly("supports", [](py::object self)
                                  {
-                                   py::object supports = py::module_::import("nvtabular").attr("graph").attr("base_operator").attr("Supports");
+                                   py::object supports = py::module_::import("nvtabular").attr("graph").attr("operator").attr("Supports");
                                    return supports.attr("CPU_DICT_ARRAY");
+                                 })
+          .def_property_readonly("supported_formats", [](py::object self)
+                                 {
+                                   py::object supported = py::module_::import("nvtabular").attr("graph").attr("operator").attr("DataFormats");
+                                   return supported.attr("NUMPY_DICT_ARRAY");
                                  });
     }
   } // namespace inference

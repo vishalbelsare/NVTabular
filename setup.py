@@ -13,15 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import codecs
 import os
-import subprocess
 import sys
-from distutils.spawn import find_executable
 
 from pybind11.setup_helpers import Pybind11Extension
 from pybind11.setup_helpers import build_ext as build_pybind11
 from setuptools import find_namespace_packages, find_packages, setup
-from setuptools.command.build_py import build_py as _build_py
 from setuptools.command.develop import develop as _develop
 
 try:
@@ -33,36 +31,6 @@ except ImportError:
     # make this work by adding this directory to the python path
     sys.path.append(os.path.dirname(os.path.realpath(__file__)))
     import versioneer
-
-
-class build_proto(_build_py):
-    def run(self):
-        protoc = None
-        if "PROTOC" in os.environ and os.path.exists(os.environ["PROTOC"]):
-            protoc = os.environ["PROTOC"]
-        else:
-            protoc = find_executable("protoc")
-        if protoc is None:
-            sys.stderr.write("protoc not found")
-            sys.exit(1)
-
-        # need to set this environment variable otherwise we get an error like "
-        #  model_config.proto: A file with this name is already in the pool. " when
-        # importing the generated file
-        env = os.environ.copy()
-        env["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
-
-        for source in ["nvtabular/inference/triton/model_config.proto"]:
-            output = source.replace(".proto", "_pb2.py")
-            pwd = os.path.dirname(output)
-            if not os.path.exists(output) or (os.path.getmtime(source) > os.path.getmtime(output)):
-                print("Generating", output, "from", source)
-                cmd = [protoc, f"--python_out={pwd}", f"--proto_path={pwd}", source]
-                subprocess.check_call(cmd, env=env)
-            else:
-                print("not regenerating", output, " - file exists and proto hasn't been updated")
-
-        super().run()
 
 
 class develop(_develop):
@@ -90,30 +58,48 @@ ext_modules = [
 
 cmdclass = versioneer.get_cmdclass()
 cmdclass["build_ext"] = build_pybind11
-cmdclass["build_py"] = build_proto
 cmdclass["develop"] = develop
 
 
-def parse_requirements(filename):
-    """load requirements from a pip requirements file"""
-    lineiter = (line.strip() for line in open(filename))
-    return [line for line in lineiter if line and not line.startswith("#")]
+def read_requirements(req_path, filename):
+    base = os.path.abspath(os.path.dirname(__file__))
+    with codecs.open(os.path.join(base, req_path, filename), "rb", "utf-8") as f:
+        lineiter = (line.strip() for line in f)
+        packages = []
+        for line in lineiter:
+            if line:
+                if line.startswith("-r"):
+                    filename = line.replace("-r", "").strip()
+                    packages.extend(read_requirements(req_path, filename))
+                elif not line.startswith("#"):
+                    packages.append(line)
+        return packages
 
 
-install_reqs = parse_requirements("./requirements.txt")
+install_requires = read_requirements("requirements", "base.txt")
+extras_require = {
+    "gpu": read_requirements("requirements", "gpu.txt"),
+}
+
+with open("README.md", encoding="utf8") as readme_file:
+    long_description = readme_file.read()
 
 setup(
     name="nvtabular",
     version=versioneer.get_version(),
-    packages=find_packages() + find_namespace_packages(),
+    packages=find_packages(include=["nvtabular*"]) + find_namespace_packages(include=["merlin*"]),
     url="https://github.com/NVIDIA-Merlin/NVTabular",
     author="NVIDIA Corporation",
     license="Apache 2.0",
-    long_description=open("README.md", encoding="utf8").read(),
+    long_description=long_description,
     long_description_content_type="text/markdown",
     classifiers=[
         "Development Status :: 4 - Beta",
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3 :: Only",
         "Intended Audience :: Developers",
         "License :: OSI Approved :: Apache Software License",
         "Topic :: Software Development :: Libraries",
@@ -122,5 +108,7 @@ setup(
     cmdclass=cmdclass,
     ext_modules=ext_modules,
     zip_safe=False,
-    install_requires=install_reqs,
+    python_requires=">=3.8",
+    install_requires=install_requires,
+    extras_require=extras_require,
 )

@@ -22,14 +22,16 @@ import signal
 import socket
 import subprocess
 import time
+from pathlib import Path
+from unittest.mock import patch
 
 import dask
-import numpy as np
 import pandas as pd
 
-try:
-    import cudf
+from merlin.core.compat import cudf
+from merlin.core.compat import numpy as np
 
+if cudf:
     try:
         import cudf.testing._utils
 
@@ -38,8 +40,7 @@ try:
         import cudf.tests.utils
 
         assert_eq = cudf.tests.utils.assert_eq
-except ImportError:
-    cudf = None
+else:
 
     def assert_eq(a, b, *args, **kwargs):
         if isinstance(a, pd.DataFrame):
@@ -52,11 +53,13 @@ except ImportError:
 
 import pytest
 from asvdb import ASVDb, BenchmarkInfo, utils
-from dask.distributed import Client, LocalCluster
 from numba import cuda
 
 import nvtabular
+from merlin.core.utils import Distributed
 from merlin.dag.node import iter_nodes
+
+REPO_ROOT = Path(__file__).parent.parent
 
 allcols_csv = ["timestamp", "id", "label", "name-string", "x", "y", "z"]
 mycols_csv = ["name-string", "id", "label", "x", "y"]
@@ -95,8 +98,9 @@ _CUDA_CLUSTER = None
 
 @pytest.fixture(scope="module")
 def client():
-    cluster = LocalCluster(n_workers=2)
-    client = Client(cluster)
+    distributed = Distributed()
+    cluster = distributed.cluster
+    client = distributed.client
     yield client
     client.close()
     cluster.close()
@@ -160,20 +164,34 @@ def datasets(tmpdir_factory):
     half = int(len(df) // 2)
 
     # Write Parquet Dataset
-    df.iloc[:half].to_parquet(str(datadir["parquet"].join("dataset-0.parquet")), chunk_size=1000)
-    df.iloc[half:].to_parquet(str(datadir["parquet"].join("dataset-1.parquet")), chunk_size=1000)
+    cudf_version = 0
+    if cudf:
+        cudf_version = cudf.__version__.split(".")[:2]
+        cudf_version = float(".".join(cudf_version))
+
+    if cudf_version > 22.10:
+        df.iloc[:half].to_parquet(
+            str(datadir["parquet"].join("dataset-0.parquet")), row_group_size_rows=5000
+        )
+        df.iloc[half:].to_parquet(
+            str(datadir["parquet"].join("dataset-1.parquet")), row_group_size_rows=5000
+        )
+    else:
+        df.iloc[:half].to_parquet(
+            str(datadir["parquet"].join("dataset-0.parquet")), chunk_size=1000
+        )
+        df.iloc[half:].to_parquet(
+            str(datadir["parquet"].join("dataset-1.parquet")), chunk_size=1000
+        )
 
     # Write CSV Dataset (Leave out categorical column)
-    df.iloc[:half].drop(columns=["name-cat"]).to_csv(
-        str(datadir["csv"].join("dataset-0.csv")), index=False
-    )
-    df.iloc[half:].drop(columns=["name-cat"]).to_csv(
-        str(datadir["csv"].join("dataset-1.csv")), index=False
-    )
-    df.iloc[:half].drop(columns=["name-cat"]).to_csv(
+    df = df[allcols_csv]  # Set deterministic column order before write
+    df.iloc[:half].to_csv(str(datadir["csv"].join("dataset-0.csv")), index=False)
+    df.iloc[half:].to_csv(str(datadir["csv"].join("dataset-1.csv")), index=False)
+    df.iloc[:half].to_csv(
         str(datadir["csv-no-header"].join("dataset-0.csv")), header=False, index=False
     )
-    df.iloc[half:].drop(columns=["name-cat"]).to_csv(
+    df.iloc[half:].to_csv(
         str(datadir["csv-no-header"].join("dataset-1.csv")), header=False, index=False
     )
 
@@ -215,7 +233,7 @@ def dataset(request, paths, engine):
     try:
         cpu = request.getfixturevalue("cpu")
     except Exception:  # pylint: disable=broad-except
-        cpu = False
+        cpu = None
 
     kwargs = {}
     if engine == "csv-no-header":
@@ -237,7 +255,6 @@ def asv_db():
 
 @pytest.fixture(scope="session")
 def bench_info():
-
     # Create a BenchmarkInfo object describing the benchmarking environment.
     # This can/should be reused when adding multiple results from the same environment.
 
@@ -249,7 +266,7 @@ def bench_info():
     bInfo = BenchmarkInfo(
         machineName=socket.gethostname(),
         cudaVer=cuda_version,
-        osType="%s" % (uname.system),
+        osType=f"{uname.system}",
         pythonVer=platform.python_version(),
         commitHash=commitHash,
         commitTime=commitTime,
@@ -307,7 +324,7 @@ def run_triton_server(
         try:
             with grpcclient.InferenceServerClient("localhost:8001") as client:
                 # wait until server is ready
-                for _ in range(60):
+                for _ in range(120):
                     if process.poll() is not None:
                         retcode = process.returncode
                         raise RuntimeError(f"Tritonserver failed to start (ret={retcode})")
@@ -355,3 +372,42 @@ def devices(request):
 @pytest.fixture
 def report(request):
     return request.config.getoption("--report")
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        path = item.location[0]
+
+        if "/unit/" in path:
+            item.add_marker(getattr(pytest.mark, "unit"))
+
+        if "/loader/" in path:
+            item.add_marker(getattr(pytest.mark, "loader"))
+
+        if "/examples/" in path:
+            item.add_marker(getattr(pytest.mark, "examples"))
+
+        if "/ops/" in path:
+            item.add_marker(getattr(pytest.mark, "ops"))
+
+        if "test_tf_" in path:
+            item.add_marker(getattr(pytest.mark, "tensorflow"))
+
+        if "test_torch_" in path:
+            item.add_marker(getattr(pytest.mark, "torch"))
+
+
+@pytest.fixture(scope="function", autouse=True)
+def cleanup_dataloader():
+    """After each test runs. Call .stop() on any dataloaders created during the test.
+    The avoids issues with background threads hanging around and interfering with subsequent tests.
+    This happens when a dataloader is partially consumed (not all batches are iterated through).
+    """
+    from merlin.dataloader.loader_base import LoaderBase
+
+    with patch.object(
+        LoaderBase, "__iter__", side_effect=LoaderBase.__iter__, autospec=True
+    ) as patched:
+        yield
+        for call in patched.call_args_list:
+            call.args[0].stop()

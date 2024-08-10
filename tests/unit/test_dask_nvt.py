@@ -24,13 +24,14 @@ from dask.dataframe import assert_eq
 from dask.dataframe import from_pandas as dd_from_pandas
 from dask.dataframe import read_parquet as dd_read_parquet
 
+from merlin.core.compat import cudf, dask_cudf
 from merlin.core.utils import global_dask_client, set_dask_client
 from merlin.io import Shuffle
 from nvtabular import ColumnSelector, Dataset, Workflow, ops
 from tests.conftest import allcols_csv, mycols_csv, mycols_pq
 
-cudf = pytest.importorskip("cudf")
-dask_cudf = pytest.importorskip("dask_cudf")
+if not cudf:
+    pytest.skip(reason="cudf not successfully imported", allow_module_level=True)
 
 # Dummy operator logic to test stats
 # TODO: Possibly add public API to add
@@ -280,6 +281,26 @@ def test_dask_preproc_cpu(client, tmpdir, datasets, engine, shuffle, cpu):
         df_disk.sort_values(["id", "x"])[["name-string", "label"]],
         check_index=False,
     )
+
+
+@pytest.mark.parametrize("engine", ["parquet", "csv"])
+@pytest.mark.parametrize("cpu", [None, True])
+def test_dask_lambda_op(client, tmpdir, datasets, engine, cpu):
+    set_dask_client(client=client)
+
+    paths = glob.glob(str(datasets[engine]) + "/*." + engine.split("-")[0])
+    dataset = Dataset(paths)
+
+    features = (
+        ["name-string"]
+        >> ops.Categorify()
+        >> ops.LambdaOp(lambda x: x.astype("int16"), dtype="int16")
+    )
+    workflow = Workflow(features)
+    workflow.fit(dataset)
+
+    transformed = workflow.transform(dataset).compute(scheduler="synchronous")
+    assert transformed["name-string"].dtype == "int16"
 
 
 @pytest.mark.parametrize("cpu", [None, True])

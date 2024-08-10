@@ -15,14 +15,10 @@
 #
 import warnings
 
-try:
-    import cudf
-except ImportError:
-    cudf = None
-
 import dask.dataframe as dd
 import pandas as pd
 
+from merlin.core.compat import cudf
 from merlin.core.dispatch import (
     DataFrameType,
     ExtData,
@@ -33,8 +29,7 @@ from merlin.core.dispatch import (
     to_host,
 )
 from merlin.schema import Schema
-
-from .operator import ColumnSelector, Operator
+from nvtabular.ops.operator import ColumnSelector, Operator
 
 
 class JoinExternal(Operator):
@@ -120,7 +115,6 @@ class JoinExternal(Operator):
 
     @property
     def _ext(self):
-
         if self._ext_cache is not None:
             # Return cached result if present
             return convert_data(self._ext_cache, cpu=self.cpu)

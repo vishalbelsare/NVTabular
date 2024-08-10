@@ -12,13 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
+
 import numpy
 from dask.dataframe.utils import meta_nonempty
 
 from merlin.core.dispatch import DataFrameType, annotate
+from merlin.dtypes.shape import DefaultShapes
 from merlin.schema import Schema
-
-from .operator import ColumnSelector, Operator
+from nvtabular.ops.operator import ColumnSelector, Operator
 
 
 class Groupby(Operator):
@@ -34,10 +36,13 @@ class Groupby(Operator):
 
     Example usage::
 
+        groupby_cols = ['user_id', 'session_id']
+        dataset = dataset.shuffle_by_keys(keys=groupby_cols)
+
         groupby_features = [
             'user_id', 'session_id', 'month', 'prod_id',
         ] >> ops.Groupby(
-            groupby_cols=['user_id', 'session_id'],
+            groupby_cols=groupby_cols,
             sort_cols=['month'],
             aggs={
                 'prod_id': 'list',
@@ -46,10 +51,15 @@ class Groupby(Operator):
         )
         processor = nvtabular.Workflow(groupby_features)
 
+        workflow.fit(dataset)
+        dataset_transformed = workflow.transform(dataset)
+
     Parameters
     -----------
     groupby_cols : str or list of str
         The column names to be used as groupby keys.
+        WARNING: Ensure the dataset was partitioned by those
+        groupby keys (see above for an example).
     sort_cols : str or list of str
         Columns to be used to sort each partition before
         groupby aggregation is performed. If this argument
@@ -170,26 +180,43 @@ class Groupby(Operator):
 
         return column_mapping
 
+    @property
+    def dependencies(self):
+        return self.groupby_cols
+
     def _compute_dtype(self, col_schema, input_schema):
         col_schema = super()._compute_dtype(col_schema, input_schema)
 
-        dtype = col_schema.dtype
-        is_list = col_schema.is_list
+        agg_dtypes = {
+            "count": numpy.int32,
+            "nunique": numpy.int32,
+            "mean": numpy.float32,
+            "var": numpy.float32,
+            "std": numpy.float32,
+            "median": numpy.float32,
+            "sum": numpy.float32,
+        }
 
-        dtypes = {"count": numpy.int32, "mean": numpy.float32}
+        agg = self._find_agg(col_schema, input_schema)
+        dtype = agg_dtypes.get(agg, col_schema.dtype)
 
-        is_lists = {"list": True}
+        return col_schema.with_dtype(dtype)
 
-        for col_name in input_schema.column_names:
-            combined_aggs = _aggs_for_column(col_name, self.conv_aggs)
-            combined_aggs += _aggs_for_column(col_name, self.list_aggs)
-            for agg in combined_aggs:
-                if col_schema.name.endswith(f"{self.name_sep}{agg}"):
-                    dtype = dtypes.get(agg, dtype)
-                    is_list = is_lists.get(agg, is_list)
-                    break
+    def _compute_shape(self, col_schema, input_schema):
+        agg_is_lists = {"list": True}
 
-        return col_schema.with_dtype(dtype, is_list=is_list, is_ragged=is_list)
+        agg = self._find_agg(col_schema, input_schema)
+        is_list = agg_is_lists.get(agg, col_schema.is_list)
+
+        shape = DefaultShapes.LIST if is_list else DefaultShapes.SCALAR
+        return col_schema.with_shape(shape)
+
+    def _find_agg(self, col_schema, input_schema):
+        input_selector = ColumnSelector(input_schema.column_names)
+        column_mapping = self.column_mapping(input_selector)
+        input_column_name = column_mapping[col_schema.name][0]
+        agg = col_schema.name.replace(input_column_name, "").lstrip(self.name_sep)
+        return agg
 
 
 def _aggs_for_column(col_name, agg_dict):
@@ -207,7 +234,6 @@ def _columns_out_from_aggs(aggs, name_sep="_"):
 
 
 def _apply_aggs(_df, groupby_cols, _list_aggs, _conv_aggs, name_sep="_", ascending=True):
-
     # Apply conventional aggs
     _columns = list(set(groupby_cols) | set(_conv_aggs) | set(_list_aggs))
     df = _df[_columns].groupby(groupby_cols).agg(_conv_aggs).reset_index()
@@ -227,9 +253,9 @@ def _apply_aggs(_df, groupby_cols, _list_aggs, _conv_aggs, name_sep="_", ascendi
             df.drop(columns=[col + f"{name_sep}list"], inplace=True)
 
     for col in df.columns:
-        if col.endswith(f"{name_sep}count"):
+        if re.search(f"{name_sep}(count|nunique)$", col):
             df[col] = df[col].astype(numpy.int32)
-        elif col.endswith(f"{name_sep}mean"):
+        elif re.search(f"{name_sep}(mean|median|std|var|sum)$", col):
             df[col] = df[col].astype(numpy.float32)
 
     return df
@@ -276,9 +302,7 @@ def _first(x):
     # item in the list
     if hasattr(x, "list"):
         # cuDF-specific behavior
-        offsets = x.list._column.offsets
-        elements = x.list._column.elements
-        return elements[offsets[:-1]]
+        return x.list.get(0)
     else:
         # cpu/pandas
         return x.apply(lambda y: y[0])
@@ -289,9 +313,7 @@ def _last(x):
     # item in the list
     if hasattr(x, "list"):
         # cuDF-specific behavior
-        offsets = x.list._column.offsets
-        elements = x.list._column.elements
-        return elements[offsets[1:].values - 1]
+        return x.list.get(-1)
     else:
         # cpu/pandas
         return x.apply(lambda y: y[-1])

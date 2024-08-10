@@ -25,9 +25,8 @@ from merlin.core.dispatch import (
     is_list_dtype,
 )
 from merlin.schema import Tags
-
-from .categorify import _emb_sz_rule
-from .operator import ColumnSelector, Operator
+from nvtabular.ops.categorify import _emb_sz_rule
+from nvtabular.ops.operator import ColumnSelector, Operator
 
 
 class HashBucket(Operator):
@@ -53,7 +52,7 @@ class HashBucket(Operator):
 
     If you would like to do frequency capping or frequency hashing,
     you should use Categorify op instead. See
-    `Categorify op <https://github.com/NVIDIA/NVTabular/blob/main/nvtabular/ops/categorify.py#L43>`_
+    `Categorify op <https://github.com/NVIDIA/NVTabular/blob/stable/nvtabular/ops/categorify.py>`_
     for example usage.
 
 

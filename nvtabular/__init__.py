@@ -21,9 +21,7 @@ from merlin import io
 from merlin.core import dispatch, utils  # noqa
 from merlin.dag import ColumnSelector
 from merlin.schema import ColumnSchema, Schema
-
-from . import workflow  # noqa
-from ._version import get_versions
+from nvtabular import _version, ops, workflow  # noqa
 
 # suppress some warnings with cudf warning about column ordering with dlpack
 # and numba warning about deprecated environment variables
@@ -61,5 +59,4 @@ __all__ = [
 warnings.filterwarnings("ignore", module="cudf.io.dlpack")
 
 
-__version__ = get_versions()["version"]
-del get_versions
+__version__ = _version.get_versions()["version"]
